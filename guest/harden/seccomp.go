@@ -56,11 +56,6 @@ func exploitIndicatorBlocks() secbpf.SyscallGroup {
 	return secbpf.SyscallGroup{
 		Action: secbpf.ActionKillProcess,
 		Names: []string{
-			// io_uring — prolific source of kernel CVEs.
-			"io_uring_setup",
-			"io_uring_enter",
-			"io_uring_register",
-
 			// Process debugging / cross-process memory access.
 			"ptrace",
 			"process_vm_readv",
@@ -91,6 +86,15 @@ func operationalBlocks() secbpf.SyscallGroup {
 	return secbpf.SyscallGroup{
 		Action: secbpf.ActionErrno,
 		Names: []string{
+			// io_uring — prolific source of kernel CVEs. Returns EPERM
+			// (rather than killing) because libuv 1.52+ probes io_uring_setup
+			// unconditionally on Linux and falls back to epoll when the
+			// syscall fails. UV_USE_IO_URING=0 does not gate the probe in
+			// libuv 1.52 (only the SQPOLL path honors it).
+			"io_uring_setup",
+			"io_uring_enter",
+			"io_uring_register",
+
 			// Filesystem manipulation — boot is already done.
 			"mount",
 			"umount2",
