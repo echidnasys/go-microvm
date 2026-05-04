@@ -24,9 +24,6 @@ func TestExploitIndicatorBlocks(t *testing.T) {
 	assert.Equal(t, secbpf.ActionKillProcess, group.Action)
 
 	expected := []string{
-		"io_uring_setup",
-		"io_uring_enter",
-		"io_uring_register",
 		"ptrace",
 		"process_vm_readv",
 		"process_vm_writev",
@@ -48,6 +45,9 @@ func TestOperationalBlocks(t *testing.T) {
 	assert.Equal(t, secbpf.ActionErrno, group.Action)
 
 	expected := []string{
+		"io_uring_setup",
+		"io_uring_enter",
+		"io_uring_register",
 		"mount",
 		"umount2",
 		"pivot_root",
