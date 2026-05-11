@@ -7,7 +7,7 @@ go 1.26.0
 
 require (
 	github.com/cenkalti/backoff/v5 v5.0.3
-	github.com/containers/gvisor-tap-vsock v0.8.8
+	github.com/containers/gvisor-tap-vsock v0.8.9
 	github.com/creack/pty v1.1.24
 	github.com/elastic/go-seccomp-bpf v1.6.0
 	github.com/gofrs/flock v0.13.0
@@ -26,7 +26,7 @@ require (
 
 require (
 	github.com/Microsoft/go-winio v0.6.2 // indirect
-	github.com/apparentlymart/go-cidr v1.1.0 // indirect
+	github.com/apparentlymart/go-cidr v1.1.1 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/containerd/errdefs v1.0.0 // indirect
 	github.com/containerd/errdefs/pkg v0.3.0 // indirect
