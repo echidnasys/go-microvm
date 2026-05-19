@@ -48,7 +48,7 @@ toolchain that CI and Release need.
    arm64 on `ubuntu-24.04-arm`) — no QEMU emulation
 2. Pushes each image by digest
 3. Merges digests into a multi-arch manifest tagged with the libkrun
-   version (e.g., `v1.17.3`) and `latest`
+   version (e.g., `v1.18.0`) and `latest`
 
 The build takes ~20 minutes because it compiles a Linux kernel (libkrunfw).
 Results are cached via GitHub Actions cache.
