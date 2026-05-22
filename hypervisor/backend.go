@@ -46,6 +46,7 @@ type VMConfig struct {
 	RAMMiB           uint32
 	PortForwards     []PortForward
 	FilesystemMounts []FilesystemMount
+	VsockPorts       []VsockPort
 	InitConfig       InitConfig
 	DataDir          string
 	ConsoleLogPath   string
@@ -84,6 +85,18 @@ const (
 type PortForward struct {
 	Host  uint16
 	Guest uint16
+}
+
+// VsockPort wires a guest vsock port to a host Unix domain socket path.
+// Used by hypervisors that support vsock (e.g. libkrun) to expose
+// host-side processes to guest IPC. The bbox-k8s ttrpc-over-vsock
+// guest channel is the canonical consumer.
+type VsockPort struct {
+	// Port is the vsock port number the guest will connect() to.
+	Port uint32
+	// SocketPath is the host filesystem path of the UNIX socket that
+	// the hypervisor creates/binds for this port.
+	SocketPath string
 }
 
 // FilesystemMount exposes a host directory to the guest.

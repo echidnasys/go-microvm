@@ -11,6 +11,17 @@ type PortForward struct {
 	Guest uint16 `json:"guest"`
 }
 
+// VsockPort wires a guest vsock port to a host Unix domain socket path.
+// The runner subprocess calls krun_add_vsock_port(ctx, Port, SocketPath)
+// for each entry. Used by bbox-k8s for the ttrpc-over-vsock guest channel.
+type VsockPort struct {
+	// Port is the vsock port number the guest will connect() to.
+	Port uint32 `json:"port"`
+	// SocketPath is the host filesystem path of the UNIX socket that
+	// libkrun creates/binds for this port.
+	SocketPath string `json:"socket_path"`
+}
+
 // Config contains the configuration for running a VM via the go-microvm-runner subprocess.
 type Config struct {
 	// RootPath is the path to the root filesystem directory (virtiofs).
@@ -30,6 +41,11 @@ type Config struct {
 	PortForwards []PortForward `json:"port_forwards,omitempty"`
 	// VirtioFS contains virtio-fs mounts to expose host directories to the guest.
 	VirtioFS []VirtioFSMount `json:"virtiofs_mounts,omitempty"`
+	// VsockPorts wires guest vsock ports to host Unix domain sockets via
+	// krun_add_vsock_port. Each entry is processed in order. Used by the
+	// bbox-k8s ttrpc-over-vsock guest channel; the SSH-based brood-box
+	// path does not set this.
+	VsockPorts []VsockPort `json:"vsock_ports,omitempty"`
 	// ConsoleLog is the path to write console output (optional).
 	ConsoleLog string `json:"console_log_path,omitempty"`
 	// LogLevel sets the libkrun log verbosity (0-5).
