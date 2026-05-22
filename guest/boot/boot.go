@@ -33,10 +33,12 @@ import (
 //  5. Lock down /root (if enabled)
 //  6. Fix home directory ownership (rootfs hooks may not chown on macOS)
 //  7. Load environment file
-//  8. Parse SSH authorized keys
+//  8. Parse SSH authorized keys (skipped when [WithoutSSH] is set)
 //  9. Drop bounding capabilities + set no_new_privs
-//  10. Start SSH server
+//  10. Start SSH server (skipped when [WithoutSSH] is set)
 //  11. Apply seccomp BPF filter (if enabled via [WithSeccomp])
+//
+// When SSH is disabled, the returned shutdown function is a no-op.
 func Run(logger *slog.Logger, opts ...Option) (shutdown func(), err error) {
 	cfg := defaultConfig()
 	for _, o := range opts {
@@ -89,27 +91,30 @@ func Run(logger *slog.Logger, opts ...Option) (shutdown func(), err error) {
 		return nil, fmt.Errorf("loading environment: %w", err)
 	}
 
-	// 8. Parse authorized keys.
-	authorizedKeys, err := ParseAuthorizedKeys(cfg.sshKeysPath)
-	if err != nil {
-		return nil, fmt.Errorf("parsing authorized keys: %w", err)
-	}
-
-	// 8b. Load injected host key (if present). The key is deleted from
-	// disk after loading into memory so it cannot be read by the sandbox
-	// user. If the file does not exist, hostKeySigner remains nil and the
-	// SSH server will generate an ephemeral key.
+	// 8. Parse authorized keys (skipped when SSH is disabled).
+	var authorizedKeys []ssh.PublicKey
 	var hostKeySigner ssh.Signer
-	if hostKeyPEM, readErr := os.ReadFile(cfg.sshHostKeyPath); readErr == nil {
-		signer, parseErr := ssh.ParsePrivateKey(hostKeyPEM)
-		if parseErr != nil {
-			logger.Warn("failed to parse injected host key, falling back to ephemeral",
-				"path", cfg.sshHostKeyPath, "error", parseErr)
-		} else {
-			hostKeySigner = signer
-			logger.Info("loaded injected SSH host key", "path", cfg.sshHostKeyPath)
+	if !cfg.disableSSH {
+		authorizedKeys, err = ParseAuthorizedKeys(cfg.sshKeysPath)
+		if err != nil {
+			return nil, fmt.Errorf("parsing authorized keys: %w", err)
 		}
-		_ = os.Remove(cfg.sshHostKeyPath)
+
+		// 8b. Load injected host key (if present). The key is deleted from
+		// disk after loading into memory so it cannot be read by the sandbox
+		// user. If the file does not exist, hostKeySigner remains nil and the
+		// SSH server will generate an ephemeral key.
+		if hostKeyPEM, readErr := os.ReadFile(cfg.sshHostKeyPath); readErr == nil {
+			signer, parseErr := ssh.ParsePrivateKey(hostKeyPEM)
+			if parseErr != nil {
+				logger.Warn("failed to parse injected host key, falling back to ephemeral",
+					"path", cfg.sshHostKeyPath, "error", parseErr)
+			} else {
+				hostKeySigner = signer
+				logger.Info("loaded injected SSH host key", "path", cfg.sshHostKeyPath)
+			}
+			_ = os.Remove(cfg.sshHostKeyPath)
+		}
 	}
 
 	// 9. Drop unneeded capabilities from the bounding set.
@@ -127,36 +132,43 @@ func Run(logger *slog.Logger, opts ...Option) (shutdown func(), err error) {
 		return nil, fmt.Errorf("setting no_new_privs: %w", err)
 	}
 
-	// 10. Start SSH server.
-	sshdCfg := sshd.Config{
-		Port:            cfg.sshPort,
-		AuthorizedKeys:  authorizedKeys,
-		Env:             envVars,
-		DefaultUID:      cfg.userUID,
-		DefaultGID:      cfg.userGID,
-		DefaultUser:     cfg.userName,
-		DefaultHome:     cfg.userHome,
-		DefaultShell:    cfg.userShell,
-		DefaultWorkDir:  cfg.workspaceMountPoint,
-		AgentForwarding: cfg.sshAgentForwarding,
-		HostKey:         hostKeySigner,
-		Logger:          logger,
-	}
-	srv, err := sshd.New(sshdCfg)
-	if err != nil {
-		return nil, fmt.Errorf("creating SSH server: %w", err)
-	}
-
-	ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.sshPort))
-	if err != nil {
-		return nil, fmt.Errorf("listening on port %d: %w", cfg.sshPort, err)
-	}
-
-	go func() {
-		if err := srv.Serve(ln); err != nil {
-			logger.Error("SSH server error", "error", err)
+	// 10. Start SSH server (skipped when SSH is disabled — bbox-k8s uses
+	// ttrpc-over-vsock instead).
+	shutdown = func() {}
+	if !cfg.disableSSH {
+		sshdCfg := sshd.Config{
+			Port:            cfg.sshPort,
+			AuthorizedKeys:  authorizedKeys,
+			Env:             envVars,
+			DefaultUID:      cfg.userUID,
+			DefaultGID:      cfg.userGID,
+			DefaultUser:     cfg.userName,
+			DefaultHome:     cfg.userHome,
+			DefaultShell:    cfg.userShell,
+			DefaultWorkDir:  cfg.workspaceMountPoint,
+			AgentForwarding: cfg.sshAgentForwarding,
+			HostKey:         hostKeySigner,
+			Logger:          logger,
 		}
-	}()
+		srv, err := sshd.New(sshdCfg)
+		if err != nil {
+			return nil, fmt.Errorf("creating SSH server: %w", err)
+		}
+
+		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.sshPort))
+		if err != nil {
+			return nil, fmt.Errorf("listening on port %d: %w", cfg.sshPort, err)
+		}
+
+		go func() {
+			if err := srv.Serve(ln); err != nil {
+				logger.Error("SSH server error", "error", err)
+			}
+		}()
+		shutdown = func() { srv.Close() }
+	} else {
+		logger.Info("SSH bring-up disabled via WithoutSSH")
+	}
 
 	// 11. Apply seccomp BPF filter (if enabled). This must be the last
 	// step — all mounts, networking, and privileged operations are done.
@@ -167,9 +179,13 @@ func Run(logger *slog.Logger, opts ...Option) (shutdown func(), err error) {
 		}
 	}
 
-	logger.Info("sandbox init ready", "ssh_port", cfg.sshPort)
+	if cfg.disableSSH {
+		logger.Info("sandbox init ready (SSH disabled)")
+	} else {
+		logger.Info("sandbox init ready", "ssh_port", cfg.sshPort)
+	}
 
-	return func() { srv.Close() }, nil
+	return shutdown, nil
 }
 
 // lockdownRoot sets /root/ to mode 0700 so the sandbox user cannot read

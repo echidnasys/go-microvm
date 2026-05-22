@@ -22,6 +22,11 @@ type Config struct {
 	// VirtioFSMounts describes virtiofs mounts the host configured for the VM.
 	// The guest init uses this to determine mount-time options (e.g. read-only).
 	VirtioFSMounts []VirtioFSMountInfo `json:"virtiofs_mounts,omitempty"`
+	// DisableSSH, when true, tells the guest init to skip starting the
+	// in-guest SSH server. Set by the host via
+	// [github.com/stacklok/go-microvm.WithoutSSH] when the host↔guest
+	// channel is not SSH (e.g. bbox-k8s uses ttrpc-over-vsock).
+	DisableSSH bool `json:"disable_ssh,omitempty"`
 }
 
 // VirtioFSMountInfo carries mount metadata from the host to the guest init.
