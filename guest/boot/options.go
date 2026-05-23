@@ -35,6 +35,7 @@ type config struct {
 	sshAgentForwarding  bool
 	seccomp             bool
 	tmpSizeMiB          uint32
+	disableSSH          bool
 }
 
 func defaultConfig() *config {
@@ -133,6 +134,18 @@ func WithTmpSize(mib uint32) Option {
 			c.tmpSizeMiB = mib
 		}
 	})
+}
+
+// WithoutSSH disables the in-guest SSH server bring-up. When set, the
+// boot sequence skips key parsing, host-key loading, and the SSH
+// listener; all earlier steps (mounts, networking, hardening, capability
+// drops, no_new_privs) still run normally.
+//
+// Set by [github.com/stacklok/go-microvm.WithoutSSH] via the
+// /etc/go-microvm.json config file. The default brood-box CLI does NOT
+// enable this; the bbox-k8s ttrpc-over-vsock path does.
+func WithoutSSH() Option {
+	return optionFunc(func(c *config) { c.disableSSH = true })
 }
 
 // WithSeccomp controls whether a seccomp BPF blocklist filter is

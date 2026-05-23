@@ -179,6 +179,21 @@ int32_t krun_add_net_unixstream(uint32_t ctx_id, const char *c_path, int fd,
                                 uint8_t *const c_mac, uint32_t features,
                                 uint32_t flags);
 
+/**
+ * Adds a port-path pairing for guest IPC with a process in the host.
+ *
+ * Arguments:
+ *  "ctx_id"    - the configuration context ID.
+ *  "port"      - a vsock port that the guest will connect to for IPC.
+ *  "c_filepath" - a null-terminated string representing the path of the UNIX
+ *                socket in the host.
+ *
+ * Returns 0 on success and a negative errno on failure.
+ */
+int32_t krun_add_vsock_port(uint32_t ctx_id,
+                            uint32_t port,
+                            const char *c_filepath);
+
 #ifdef __cplusplus
 }
 #endif

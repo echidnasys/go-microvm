@@ -42,6 +42,13 @@ type PortForward struct {
 	Guest uint16 `json:"guest"`
 }
 
+// VsockPort wires a guest vsock port to a host Unix domain socket path.
+// Must match runner.VsockPort's JSON tags.
+type VsockPort struct {
+	Port       uint32 `json:"port"`
+	SocketPath string `json:"socket_path"`
+}
+
 // Config contains the configuration for running a VM.
 // This is passed as a JSON argument to the helper binary.
 // The fields match runner.Config's JSON serialization.
@@ -60,6 +67,9 @@ type Config struct {
 	PortForwards []PortForward `json:"port_forwards,omitempty"`
 	// VirtioFSMounts contains virtio-fs mounts as tag:path entries.
 	VirtioFSMounts []VirtioFSMount `json:"virtiofs_mounts,omitempty"`
+	// VsockPorts wires guest vsock ports to host Unix domain socket paths
+	// via krun_add_vsock_port. Used by bbox-k8s for ttrpc-over-vsock.
+	VsockPorts []VsockPort `json:"vsock_ports,omitempty"`
 	// ConsoleLogPath is the path to write console output (optional).
 	ConsoleLogPath string `json:"console_log_path,omitempty"`
 	// LogLevel sets the libkrun log verbosity (0-5).
@@ -220,6 +230,21 @@ func runVM(config *Config) error {
 		if err := ctx.SetConsoleOutput(config.ConsoleLogPath); err != nil {
 			_ = ctx.Free()
 			return fmt.Errorf("set console output: %w", err)
+		}
+	}
+
+	// Wire vsock ports for guest IPC (e.g. bbox-k8s ttrpc-over-vsock).
+	// Each entry pairs a guest vsock port number with a host UNIX socket
+	// path. libkrun creates/binds the socket when the VM starts; the
+	// guest connect()s to the vsock port and is plugged through.
+	for _, vp := range config.VsockPorts {
+		if vp.SocketPath == "" {
+			_ = ctx.Free()
+			return fmt.Errorf("vsock port %d: socket_path must not be empty", vp.Port)
+		}
+		if err := ctx.AddVsockPort(vp.Port, vp.SocketPath); err != nil {
+			_ = ctx.Free()
+			return fmt.Errorf("add vsock port %d: %w", vp.Port, err)
 		}
 	}
 

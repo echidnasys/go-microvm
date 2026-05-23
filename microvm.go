@@ -173,7 +173,7 @@ func Run(ctx context.Context, imageRef string, opts ...Option) (*VM, error) {
 		// Only written when non-default values are configured, keeping the
 		// file absent for callers that rely on built-in defaults.
 		guestVMCfg := buildVMConfig(cfg)
-		if guestVMCfg.TmpSizeMiB > 0 || len(guestVMCfg.VirtioFSMounts) > 0 {
+		if guestVMCfg.TmpSizeMiB > 0 || len(guestVMCfg.VirtioFSMounts) > 0 || guestVMCfg.DisableSSH {
 			vmCfgHook := hooks.InjectVMConfig(guestVMCfg)
 			if err := vmCfgHook(rootfs.Path, rootfs.Config); err != nil {
 				span.RecordError(err)
@@ -272,6 +272,7 @@ func Run(ctx context.Context, imageRef string, opts ...Option) (*VM, error) {
 		RAMMiB:           cfg.memory,
 		PortForwards:     toHypervisorPorts(cfg.ports),
 		FilesystemMounts: toHypervisorMounts(cfg.virtioFS),
+		VsockPorts:       toHypervisorVsockPorts(cfg.vsockPorts),
 		InitConfig:       initCfg,
 		DataDir:          cfg.dataDir,
 		ConsoleLogPath:   filepath.Join(cfg.dataDir, "console.log"),
@@ -524,6 +525,7 @@ func toHypervisorPorts(ports []PortForward) []hypervisor.PortForward {
 func buildVMConfig(cfg *config) vmconfig.Config {
 	var vc vmconfig.Config
 	vc.TmpSizeMiB = cfg.tmpSizeMiB
+	vc.DisableSSH = cfg.disableSSH
 	for _, m := range cfg.virtioFS {
 		if m.ReadOnly {
 			vc.VirtioFSMounts = append(vc.VirtioFSMounts, vmconfig.VirtioFSMountInfo{
@@ -539,6 +541,17 @@ func toHypervisorMounts(mounts []VirtioFSMount) []hypervisor.FilesystemMount {
 	out := make([]hypervisor.FilesystemMount, len(mounts))
 	for i, m := range mounts {
 		out[i] = hypervisor.FilesystemMount{Tag: m.Tag, HostPath: m.HostPath, ReadOnly: m.ReadOnly}
+	}
+	return out
+}
+
+func toHypervisorVsockPorts(ports []VsockPort) []hypervisor.VsockPort {
+	if len(ports) == 0 {
+		return nil
+	}
+	out := make([]hypervisor.VsockPort, len(ports))
+	for i, p := range ports {
+		out[i] = hypervisor.VsockPort{Port: p.Port, SocketPath: p.SocketPath}
 	}
 	return out
 }

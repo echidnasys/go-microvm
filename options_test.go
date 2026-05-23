@@ -284,3 +284,98 @@ func TestWithImageCache(t *testing.T) {
 	assert.NotEqual(t, originalCache, cfg.imageCache)
 	assert.Equal(t, newCache, cfg.imageCache)
 }
+
+func TestWithVsock_Appends(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	assert.Empty(t, cfg.vsockPorts)
+
+	WithVsock(1024, "/tmp/agent.sock").apply(cfg)
+	WithVsock(1025, "/tmp/io.sock").apply(cfg)
+
+	require.Len(t, cfg.vsockPorts, 2)
+	assert.Equal(t, uint32(1024), cfg.vsockPorts[0].Port)
+	assert.Equal(t, "/tmp/agent.sock", cfg.vsockPorts[0].SocketPath)
+	assert.Equal(t, uint32(1025), cfg.vsockPorts[1].Port)
+	assert.Equal(t, "/tmp/io.sock", cfg.vsockPorts[1].SocketPath)
+}
+
+func TestWithVsock_PreservesOrder(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	WithVsock(2000, "/run/a.sock").apply(cfg)
+	WithVsock(1000, "/run/b.sock").apply(cfg)
+	WithVsock(3000, "/run/c.sock").apply(cfg)
+
+	require.Len(t, cfg.vsockPorts, 3)
+	assert.Equal(t, uint32(2000), cfg.vsockPorts[0].Port)
+	assert.Equal(t, uint32(1000), cfg.vsockPorts[1].Port)
+	assert.Equal(t, uint32(3000), cfg.vsockPorts[2].Port)
+}
+
+func TestWithoutSSH_SetsFlag(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	assert.False(t, cfg.disableSSH)
+
+	WithoutSSH().apply(cfg)
+	assert.True(t, cfg.disableSSH)
+}
+
+func TestWithoutSSH_DefaultIsFalse(t *testing.T) {
+	t.Parallel()
+
+	cfg := defaultConfig()
+	assert.False(t, cfg.disableSSH,
+		"backward compatibility: default config must leave SSH enabled")
+}
+
+func TestToHypervisorVsockPorts(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil input", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, toHypervisorVsockPorts(nil))
+	})
+
+	t.Run("empty slice", func(t *testing.T) {
+		t.Parallel()
+		assert.Nil(t, toHypervisorVsockPorts([]VsockPort{}))
+	})
+
+	t.Run("preserves entries in order", func(t *testing.T) {
+		t.Parallel()
+		in := []VsockPort{
+			{Port: 1024, SocketPath: "/run/agent.sock"},
+			{Port: 1025, SocketPath: "/run/io.sock"},
+		}
+		out := toHypervisorVsockPorts(in)
+		require.Len(t, out, 2)
+		assert.Equal(t, uint32(1024), out[0].Port)
+		assert.Equal(t, "/run/agent.sock", out[0].SocketPath)
+		assert.Equal(t, uint32(1025), out[1].Port)
+		assert.Equal(t, "/run/io.sock", out[1].SocketPath)
+	})
+}
+
+func TestBuildVMConfig_DisableSSH(t *testing.T) {
+	t.Parallel()
+
+	t.Run("default config has SSH enabled", func(t *testing.T) {
+		t.Parallel()
+		cfg := defaultConfig()
+		vc := buildVMConfig(cfg)
+		assert.False(t, vc.DisableSSH)
+	})
+
+	t.Run("WithoutSSH propagates to vmconfig", func(t *testing.T) {
+		t.Parallel()
+		cfg := defaultConfig()
+		WithoutSSH().apply(cfg)
+		vc := buildVMConfig(cfg)
+		assert.True(t, vc.DisableSSH)
+	})
+}

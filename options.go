@@ -39,6 +39,19 @@ type PortForward struct {
 	Guest uint16
 }
 
+// VsockPort wires a guest vsock port to a host Unix domain socket path.
+// libkrun creates/binds the socket when the VM starts; a guest process
+// then connect()s to the vsock port to talk to whatever the caller
+// attaches to the socket on the host side. Used by the bbox-k8s
+// ttrpc-over-vsock guest channel.
+type VsockPort struct {
+	// Port is the vsock port number the guest will connect() to.
+	Port uint32
+	// SocketPath is the host filesystem path of the UNIX socket that
+	// libkrun creates/binds for this port. Must be non-empty.
+	SocketPath string
+}
+
 // VirtioFSMount exposes a host directory to the guest via virtio-fs.
 type VirtioFSMount struct {
 	Tag      string
@@ -99,6 +112,8 @@ type config struct {
 	imageFetcher          image.ImageFetcher // nil = default local-then-remote fallback
 	backend               hypervisor.Backend // nil = default libkrun backend
 	logLevel              uint32             // libkrun log level (0=off, 5=trace)
+	vsockPorts            []VsockPort        // krun_add_vsock_port wirings (bbox-k8s ttrpc)
+	disableSSH            bool               // signal to guest init via vmconfig.Config.DisableSSH
 	cleanDataDir          bool
 	removeAll             func(string) error
 	stat                  func(string) (os.FileInfo, error)
@@ -324,6 +339,42 @@ func WithImageFetcher(f image.ImageFetcher) Option {
 // Logs are written to vm.log in the data directory.
 func WithLogLevel(level uint32) Option {
 	return optionFunc(func(c *config) { c.logLevel = level })
+}
+
+// WithVsock wires a guest vsock port to a host Unix domain socket path.
+// The runner subprocess calls krun_add_vsock_port(port, socketPath) before
+// starting the VM. libkrun creates/binds the socket and the guest can
+// connect() to the vsock port to talk to whatever the host attaches to
+// the other end.
+//
+// May be called multiple times to wire multiple ports; entries are
+// processed in the order they were added. socketPath must be non-empty.
+//
+// Used by bbox-k8s for the ttrpc-over-vsock guest channel. The default
+// SSH-based brood-box path does not call this.
+func WithVsock(port uint32, socketPath string) Option {
+	return optionFunc(func(c *config) {
+		c.vsockPorts = append(c.vsockPorts, VsockPort{
+			Port:       port,
+			SocketPath: socketPath,
+		})
+	})
+}
+
+// WithoutSSH signals to the guest init that the in-guest SSH server
+// should not be started. The flag is written into the rootfs config
+// file (/etc/go-microvm.json) and read by [guest/boot.Run] before it
+// reaches the SSH start step.
+//
+// Used by bbox-k8s where the host↔guest channel is ttrpc-over-vsock,
+// not SSH. The brood-box CLI does NOT call this; brood-box continues
+// to use SSH unchanged.
+//
+// This is purely a guest-side signal: it does not change anything in
+// the host process or runner subprocess. Callers that supply their own
+// guest init binary (e.g. bbox-agent) may choose to ignore the flag.
+func WithoutSSH() Option {
+	return optionFunc(func(c *config) { c.disableSSH = true })
 }
 
 // WithTmpSize sets the size of the /tmp tmpfs inside the guest VM in MiB.

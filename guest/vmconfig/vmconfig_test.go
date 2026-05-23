@@ -45,6 +45,21 @@ func TestReadFrom(t *testing.T) {
 			want:    Config{},
 		},
 		{
+			name:    "DisableSSH true",
+			content: strPtr(`{"disable_ssh":true}`),
+			want:    Config{DisableSSH: true},
+		},
+		{
+			name:    "DisableSSH false is default (no key)",
+			content: strPtr(`{}`),
+			want:    Config{},
+		},
+		{
+			name:    "DisableSSH alongside other fields",
+			content: strPtr(`{"tmp_size_mib":256,"disable_ssh":true}`),
+			want:    Config{TmpSizeMiB: 256, DisableSSH: true},
+		},
+		{
 			name:    "malformed JSON",
 			content: strPtr(`{not json`),
 			wantErr: true,

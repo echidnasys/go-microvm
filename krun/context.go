@@ -322,6 +322,28 @@ func (c *Context) StartEnter() error {
 	return fmt.Errorf("krun_start_enter failed: %d", ret)
 }
 
+// AddVsockPort wires a vsock port number to a host Unix domain socket path.
+// libkrun-side this calls krun_add_vsock_port(ctx_id, port, c_filepath).
+// The guest will be able to connect() to the given vsock port and the host
+// process owning the Unix socket will receive the connection. Used by the
+// bbox-k8s ttrpc-over-vsock guest channel.
+//
+// May be called multiple times to wire multiple ports. socketPath must be
+// non-empty; libkrun creates/binds the socket when the VM starts.
+func (c *Context) AddVsockPort(port uint32, socketPath string) error {
+	if socketPath == "" {
+		return fmt.Errorf("krun_add_vsock_port: socketPath must not be empty")
+	}
+	cPath := C.CString(socketPath)
+	defer C.free(unsafe.Pointer(cPath))
+
+	ret := C.krun_add_vsock_port(c.id, C.uint32_t(port), cPath)
+	if ret < 0 {
+		return fmt.Errorf("krun_add_vsock_port failed: %d", ret)
+	}
+	return nil
+}
+
 // AddNetUnixStream adds a network device backed by a Unix stream socket.
 // Used with gvproxy's QEMU transport (4-byte BE length-prefixed frames over SOCK_STREAM).
 // This disables TSI networking.

@@ -114,6 +114,15 @@ func TestWithLockdownRoot(t *testing.T) {
 	assert.False(t, cfg.lockdownRoot)
 }
 
+func TestWithoutSSH_SetsFlag(t *testing.T) {
+	t.Parallel()
+	cfg := defaultConfig()
+	assert.False(t, cfg.disableSSH, "default boot config must leave SSH enabled")
+
+	WithoutSSH().apply(cfg)
+	assert.True(t, cfg.disableSSH)
+}
+
 func TestOptionComposition(t *testing.T) {
 	t.Parallel()
 	cfg := defaultConfig()
