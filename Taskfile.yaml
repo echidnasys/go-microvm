@@ -166,17 +166,19 @@ tasks:
   # =============================================================================
 
   test:
-    desc: Run unit tests
+    desc: Run unit tests (both default and -tags=nosshd variants of guest/boot)
     cmds:
       - go test -v -race ./...
+      - go test -v -race -tags=nosshd ./...
 
   test-nocgo:
-    desc: Run unit tests excluding CGO packages
+    desc: Run unit tests excluding CGO packages (both default and -tags=nosshd variants)
     cmds:
       - go test -v -race $(go list ./... | grep -v krun | grep -v go-microvm-runner)
+      - go test -v -race -tags=nosshd $(go list ./... | grep -v krun | grep -v go-microvm-runner)
 
   test-coverage:
-    desc: Run tests with coverage
+    desc: Run tests with coverage (default build covers the SSH path)
     cmds:
       - go test -v -race -coverprofile=coverage.out ./...
       - go tool cover -html=coverage.out -o coverage.html
@@ -204,11 +206,12 @@ tasks:
       - go mod tidy
 
   build-nocgo:
-    desc: Verify compilation of pure Go packages (no CGO)
+    desc: Verify compilation of pure Go packages (no CGO), both default and -tags=nosshd
     env:
       CGO_ENABLED: "0"
     cmds:
       - go build $(go list ./... | grep -v krun | grep -v go-microvm-runner)
+      - go build -tags=nosshd $(go list ./... | grep -v krun | grep -v go-microvm-runner)
 
   verify:
     desc: Verify code (fmt, lint, test)

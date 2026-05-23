@@ -6,24 +6,18 @@
 package boot
 
 import (
-	"bufio"
 	"fmt"
 	"log/slog"
-	"net"
 	"os"
-
-	"golang.org/x/crypto/ssh"
 
 	"github.com/stacklok/go-microvm/guest/env"
 	"github.com/stacklok/go-microvm/guest/harden"
 	"github.com/stacklok/go-microvm/guest/mount"
 	"github.com/stacklok/go-microvm/guest/netcfg"
-	"github.com/stacklok/go-microvm/guest/sshd"
 )
 
-// Run executes the full guest boot sequence and returns a shutdown function
-// that stops the SSH server. The caller should block on signals and then
-// invoke shutdown before halting.
+// Run executes the full guest boot sequence and returns a shutdown function.
+// The caller should block on signals and then invoke shutdown before halting.
 //
 // Boot sequence:
 //  1. Essential mounts (/proc, /sys, /dev, etc.)
@@ -33,12 +27,17 @@ import (
 //  5. Lock down /root (if enabled)
 //  6. Fix home directory ownership (rootfs hooks may not chown on macOS)
 //  7. Load environment file
-//  8. Parse SSH authorized keys (skipped when [WithoutSSH] is set)
-//  9. Drop bounding capabilities + set no_new_privs
-//  10. Start SSH server (skipped when [WithoutSSH] is set)
-//  11. Apply seccomp BPF filter (if enabled via [WithSeccomp])
+//  8. Drop bounding capabilities + set no_new_privs
+//  9. SSH bring-up (skipped when [WithoutSSH] is set or when built with -tags=nosshd)
+//  10. Apply seccomp BPF filter (if enabled via [WithSeccomp])
 //
-// When SSH is disabled, the returned shutdown function is a no-op.
+// The SSH bring-up (parsing authorized_keys, loading the host key, starting
+// the listener) lives in build-tag-gated files. By default the SSH path is
+// compiled in — passing -tags=nosshd at build time strips it, removing
+// golang.org/x/crypto/ssh from the dependency graph. Builds with that tag
+// must call [WithoutSSH] to acknowledge that SSH is unavailable.
+//
+// When SSH is not brought up, the returned shutdown function is a no-op.
 func Run(logger *slog.Logger, opts ...Option) (shutdown func(), err error) {
 	cfg := defaultConfig()
 	for _, o := range opts {
@@ -91,33 +90,7 @@ func Run(logger *slog.Logger, opts ...Option) (shutdown func(), err error) {
 		return nil, fmt.Errorf("loading environment: %w", err)
 	}
 
-	// 8. Parse authorized keys (skipped when SSH is disabled).
-	var authorizedKeys []ssh.PublicKey
-	var hostKeySigner ssh.Signer
-	if !cfg.disableSSH {
-		authorizedKeys, err = ParseAuthorizedKeys(cfg.sshKeysPath)
-		if err != nil {
-			return nil, fmt.Errorf("parsing authorized keys: %w", err)
-		}
-
-		// 8b. Load injected host key (if present). The key is deleted from
-		// disk after loading into memory so it cannot be read by the sandbox
-		// user. If the file does not exist, hostKeySigner remains nil and the
-		// SSH server will generate an ephemeral key.
-		if hostKeyPEM, readErr := os.ReadFile(cfg.sshHostKeyPath); readErr == nil {
-			signer, parseErr := ssh.ParsePrivateKey(hostKeyPEM)
-			if parseErr != nil {
-				logger.Warn("failed to parse injected host key, falling back to ephemeral",
-					"path", cfg.sshHostKeyPath, "error", parseErr)
-			} else {
-				hostKeySigner = signer
-				logger.Info("loaded injected SSH host key", "path", cfg.sshHostKeyPath)
-			}
-			_ = os.Remove(cfg.sshHostKeyPath)
-		}
-	}
-
-	// 9. Drop unneeded capabilities from the bounding set.
+	// 8. Drop unneeded capabilities from the bounding set.
 	logger.Info("dropping unnecessary capabilities")
 	if err := harden.DropBoundingCaps(
 		harden.CapSetUID,
@@ -132,45 +105,15 @@ func Run(logger *slog.Logger, opts ...Option) (shutdown func(), err error) {
 		return nil, fmt.Errorf("setting no_new_privs: %w", err)
 	}
 
-	// 10. Start SSH server (skipped when SSH is disabled — bbox-k8s uses
-	// ttrpc-over-vsock instead).
-	shutdown = func() {}
-	if !cfg.disableSSH {
-		sshdCfg := sshd.Config{
-			Port:            cfg.sshPort,
-			AuthorizedKeys:  authorizedKeys,
-			Env:             envVars,
-			DefaultUID:      cfg.userUID,
-			DefaultGID:      cfg.userGID,
-			DefaultUser:     cfg.userName,
-			DefaultHome:     cfg.userHome,
-			DefaultShell:    cfg.userShell,
-			DefaultWorkDir:  cfg.workspaceMountPoint,
-			AgentForwarding: cfg.sshAgentForwarding,
-			HostKey:         hostKeySigner,
-			Logger:          logger,
-		}
-		srv, err := sshd.New(sshdCfg)
-		if err != nil {
-			return nil, fmt.Errorf("creating SSH server: %w", err)
-		}
-
-		ln, err := net.Listen("tcp", fmt.Sprintf(":%d", cfg.sshPort))
-		if err != nil {
-			return nil, fmt.Errorf("listening on port %d: %w", cfg.sshPort, err)
-		}
-
-		go func() {
-			if err := srv.Serve(ln); err != nil {
-				logger.Error("SSH server error", "error", err)
-			}
-		}()
-		shutdown = func() { srv.Close() }
-	} else {
-		logger.Info("SSH bring-up disabled via WithoutSSH")
+	// 9. SSH bring-up. The real implementation lives in ssh_enabled.go
+	// (//go:build sshd); the stub in ssh_disabled.go errors out if the
+	// caller wanted SSH but the binary wasn't built with the tag.
+	shutdown, err = bringUpSSH(logger, cfg, envVars)
+	if err != nil {
+		return nil, fmt.Errorf("ssh bring-up: %w", err)
 	}
 
-	// 11. Apply seccomp BPF filter (if enabled). This must be the last
+	// 10. Apply seccomp BPF filter (if enabled). This must be the last
 	// step — all mounts, networking, and privileged operations are done.
 	if cfg.seccomp {
 		logger.Info("applying seccomp BPF filter")
@@ -179,11 +122,7 @@ func Run(logger *slog.Logger, opts ...Option) (shutdown func(), err error) {
 		}
 	}
 
-	if cfg.disableSSH {
-		logger.Info("sandbox init ready (SSH disabled)")
-	} else {
-		logger.Info("sandbox init ready", "ssh_port", cfg.sshPort)
-	}
+	logger.Info("sandbox init ready")
 
 	return shutdown, nil
 }
@@ -195,35 +134,4 @@ func lockdownRoot(logger *slog.Logger) {
 	if err := os.Chmod("/root", 0o700); err != nil {
 		logger.Warn("failed to chmod /root", "error", err)
 	}
-}
-
-// ParseAuthorizedKeys reads an authorized_keys file and returns the parsed
-// public keys. Returns an error if no valid keys are found.
-func ParseAuthorizedKeys(path string) ([]ssh.PublicKey, error) {
-	f, err := os.Open(path)
-	if err != nil {
-		return nil, fmt.Errorf("opening %s: %w", path, err)
-	}
-	defer func() { _ = f.Close() }()
-
-	var keys []ssh.PublicKey
-	scanner := bufio.NewScanner(f)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 || line[0] == '#' {
-			continue
-		}
-		key, _, _, _, err := ssh.ParseAuthorizedKey(line)
-		if err != nil {
-			continue // skip unparseable lines
-		}
-		keys = append(keys, key)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading %s: %w", path, err)
-	}
-	if len(keys) == 0 {
-		return nil, fmt.Errorf("no valid keys found in %s", path)
-	}
-	return keys, nil
 }

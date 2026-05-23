@@ -373,6 +373,12 @@ func WithVsock(port uint32, socketPath string) Option {
 // This is purely a guest-side signal: it does not change anything in
 // the host process or runner subprocess. Callers that supply their own
 // guest init binary (e.g. bbox-agent) may choose to ignore the flag.
+//
+// In `guest/boot`, the SSH listener is also build-tag-gated: the SSH
+// path is compiled in by default, and stripped at link time when the
+// init binary is built with -tags=nosshd. Calling WithoutSSH is
+// required when the init binary is built with that tag; otherwise
+// [guest/boot.Run] fails with [guest/boot.ErrSSHNotBuilt].
 func WithoutSSH() Option {
 	return optionFunc(func(c *config) { c.disableSSH = true })
 }
