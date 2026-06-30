@@ -59,12 +59,14 @@ func (p *Provider) Start(ctx context.Context, cfg propnet.Config) error {
 	// of polluting stderr during the terminal session.
 	logbridge.RedirectLogrus()
 
-	// Build port forward map: "127.0.0.1:<host>" -> "<guestIP>:<guest>"
-	forwards := make(map[string]string, len(cfg.Forwards))
+	// Build port forward map: bind BOTH IPv4 127.0.0.1 and IPv6 [::1] for each
+	// host port, so a browser hitting "localhost:<host>" connects regardless of
+	// which family it resolves first.
+	forwards := make(map[string]string, len(cfg.Forwards)*2)
 	for _, pf := range cfg.Forwards {
-		hostAddr := fmt.Sprintf("127.0.0.1:%d", pf.Host)
 		guestAddr := fmt.Sprintf("%s:%d", topology.GuestIP, pf.Guest)
-		forwards[hostAddr] = guestAddr
+		forwards[fmt.Sprintf("127.0.0.1:%d", pf.Host)] = guestAddr
+		forwards[fmt.Sprintf("[::1]:%d", pf.Host)] = guestAddr
 	}
 
 	// Create the virtual network stack.
