@@ -46,6 +46,7 @@ type VMConfig struct {
 	RAMMiB           uint32
 	PortForwards     []PortForward
 	FilesystemMounts []FilesystemMount
+	DataDisks        []string
 	VsockPorts       []VsockPort
 	InitConfig       InitConfig
 	DataDir          string

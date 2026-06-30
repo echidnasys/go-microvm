@@ -41,6 +41,8 @@ type Config struct {
 	PortForwards []PortForward `json:"port_forwards,omitempty"`
 	// VirtioFS contains virtio-fs mounts to expose host directories to the guest.
 	VirtioFS []VirtioFSMount `json:"virtiofs_mounts,omitempty"`
+	// DataDisks are host raw-image paths attached as guest virtio-blk devices.
+	DataDisks []string `json:"data_disks,omitempty"`
 	// VsockPorts wires guest vsock ports to host Unix domain sockets via
 	// krun_add_vsock_port. Each entry is processed in order. Used by the
 	// bbox-k8s ttrpc-over-vsock guest channel; the SSH-based brood-box

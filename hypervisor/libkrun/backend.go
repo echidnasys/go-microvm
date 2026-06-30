@@ -177,6 +177,7 @@ func (b *Backend) Start(ctx context.Context, cfg hypervisor.VMConfig) (hyperviso
 		NetSocket:     netSocket,
 		PortForwards:  toRunnerPortForwards(cfg.PortForwards),
 		VirtioFS:      toRunnerVirtioFS(cfg.FilesystemMounts),
+		DataDisks:     cfg.DataDisks,
 		VsockPorts:    toRunnerVsockPorts(cfg.VsockPorts),
 		ConsoleLog:    cfg.ConsoleLogPath,
 		LogLevel:      cfg.LogLevel,
