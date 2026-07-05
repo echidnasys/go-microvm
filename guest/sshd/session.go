@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"unsafe"
@@ -234,6 +235,12 @@ func (s *Server) executeCommand(ch ssh.Channel, requests <-chan *ssh.Request, st
 	sendExitStatus(ch, exitStatus)
 }
 
+// defaultPATH is applied when neither the server config nor the client
+// provides a PATH. Without it children of the session shell inherit no PATH
+// at all: the shell itself survives on its unset-PATH builtin lookup, but
+// subprocess spawning breaks (e.g. an agent's shell tool seeing PATH empty).
+const defaultPATH = "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
 // buildEnv merges the base environment with session-specific overrides.
 func (s *Server) buildEnv(state *sessionState) []string {
 	env := make([]string, len(s.cfg.Env))
@@ -249,6 +256,18 @@ func (s *Server) buildEnv(state *sessionState) []string {
 	// Apply session-specific overrides (client "env" requests + TERM).
 	for k, v := range state.env {
 		env = append(env, k+"="+v)
+	}
+
+	// Guarantee a usable PATH; configured or client-supplied values win.
+	hasPath := false
+	for _, e := range env {
+		if strings.HasPrefix(e, "PATH=") {
+			hasPath = true
+			break
+		}
+	}
+	if !hasPath {
+		env = append(env, defaultPATH)
 	}
 
 	return env

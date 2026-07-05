@@ -200,6 +200,65 @@ func TestExecCommandEnv(t *testing.T) {
 	assert.Equal(t, "xterm-256color\n", string(output))
 }
 
+// A server configured without PATH (the production case: the boot env file
+// carries only injected variables) must still give sessions a usable PATH.
+// Without it, the wrapper shell survives on its unset-PATH builtin lookup,
+// but every child process inherits NO PATH and subprocess spawning breaks
+// (observed: an agent's shell tool with PATH empty, exit 127 on `ls`).
+func TestExecCommandDefaultPATHWhenUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	signer, pubKey := generateTestKeyPair(t)
+	_, addr := startTestServerWithConfig(t, Config{
+		Port:           0,
+		AuthorizedKeys: []ssh.PublicKey{pubKey},
+		Env:            []string{"INJECTED=x"}, // no PATH — mirrors boot.go's env-file load
+		DefaultUID:     uint32(os.Getuid()),
+		DefaultGID:     uint32(os.Getgid()),
+		DefaultUser:    "testuser",
+		DefaultHome:    os.TempDir(),
+		DefaultShell:   "/bin/sh",
+		Logger:         slog.Default(),
+	})
+
+	client := dialSSH(t, addr, signer)
+	session, err := client.NewSession()
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+
+	// Inspect the CHILD process environment, not shell expansion: a shell
+	// with unset PATH invents an internal default for its own lookups but
+	// does not export it, so `echo $PATH` looks fine while every child
+	// process still inherits no PATH at all.
+	output, err := session.CombinedOutput(`/usr/bin/env`)
+	require.NoError(t, err)
+	var pathLine string
+	for _, l := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(l, "PATH=") {
+			pathLine = l
+		}
+	}
+	require.NotEmpty(t, pathLine, "child processes must inherit a PATH; got env:\n%s", output)
+	assert.Contains(t, pathLine, "/usr/bin", "default PATH must include the standard binary dirs")
+}
+
+// An explicitly configured PATH must win over the default.
+func TestExecCommandConfiguredPATHWins(t *testing.T) {
+	t.Parallel()
+
+	signer, pubKey := generateTestKeyPair(t)
+	_, addr := startTestServer(t, pubKey) // configures PATH=/usr/bin:/bin
+
+	client := dialSSH(t, addr, signer)
+	session, err := client.NewSession()
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+
+	output, err := session.CombinedOutput(`echo "[$PATH]"`)
+	require.NoError(t, err)
+	assert.Equal(t, "[/usr/bin:/bin]", strings.TrimSpace(string(output)))
+}
+
 func TestExitCode(t *testing.T) {
 	t.Parallel()
 
