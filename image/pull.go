@@ -182,10 +182,15 @@ func PullWithFetcher(ctx context.Context, imageRef string, cache *Cache, fetcher
 	}
 	xattr.SetOverrideStat(tmpDir, 0, 0, os.ModeDir|0o755)
 
-	// Move into cache if available. The extraction is fresh and this is
-	// the only reference, so FromCache stays false — callers may safely
-	// modify the rootfs in place without a COW clone.
+	// Move into cache if available. Once Put succeeds the canonical path is
+	// INSIDE the shared cache — the next Pull of this digest serves the same
+	// directory — so the result must be flagged cache-owned (FromCache=true)
+	// or the first boot mutates the cache entry in place and every later
+	// boot inherits its writes (cross-session rootfs contamination).
+	// FromCache stays false only for the cache-less tmpDir extraction below,
+	// which really is a private single-reference copy.
 	rootfsPath := tmpDir
+	cacheOwned := false
 	if cache != nil {
 		_, cacheSpan := tracer.Start(ctx, "microvm.image.CacheStore")
 		if err := cache.Put(digestStr, tmpDir); err != nil {
@@ -195,6 +200,7 @@ func PullWithFetcher(ctx context.Context, imageRef string, cache *Cache, fetcher
 			cacheSpan.End()
 			return nil, fmt.Errorf("cache rootfs: %w", err)
 		}
+		cacheOwned = true
 		// After Put, the canonical path is in the cache.
 		if cachedPath, ok := cache.Get(digestStr); ok {
 			rootfsPath = cachedPath
@@ -204,7 +210,7 @@ func PullWithFetcher(ctx context.Context, imageRef string, cache *Cache, fetcher
 		cacheSpan.End()
 	}
 
-	return &RootFS{Path: rootfsPath, Config: ociCfg}, nil
+	return &RootFS{Path: rootfsPath, Config: ociCfg, FromCache: cacheOwned}, nil
 }
 
 // extractOCIConfig parses the image configuration into our OCIConfig type.
