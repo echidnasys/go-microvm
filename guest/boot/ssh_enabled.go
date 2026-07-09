@@ -58,18 +58,19 @@ func bringUpSSH(logger *slog.Logger, cfg *config, envVars []string) (func(), err
 	}
 
 	sshdCfg := sshd.Config{
-		Port:            cfg.sshPort,
-		AuthorizedKeys:  authorizedKeys,
-		Env:             envVars,
-		DefaultUID:      cfg.userUID,
-		DefaultGID:      cfg.userGID,
-		DefaultUser:     cfg.userName,
-		DefaultHome:     cfg.userHome,
-		DefaultShell:    cfg.userShell,
-		DefaultWorkDir:  cfg.workspaceMountPoint,
-		AgentForwarding: cfg.sshAgentForwarding,
-		HostKey:         hostKeySigner,
-		Logger:          logger,
+		Port:               cfg.sshPort,
+		AuthorizedKeys:     authorizedKeys,
+		Env:                envVars,
+		DefaultUID:         cfg.userUID,
+		DefaultGID:         cfg.userGID,
+		DefaultUser:        cfg.userName,
+		DefaultHome:        cfg.userHome,
+		DefaultShell:       cfg.userShell,
+		DefaultWorkDir:     cfg.workspaceMountPoint,
+		AgentForwarding:    cfg.sshAgentForwarding,
+		AllowTCPForwarding: cfg.sshTCPForwarding,
+		HostKey:            hostKeySigner,
+		Logger:             logger,
 	}
 	srv, err := sshd.New(sshdCfg)
 	if err != nil {

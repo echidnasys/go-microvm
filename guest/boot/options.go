@@ -33,6 +33,7 @@ type config struct {
 	userGID             uint32
 	lockdownRoot        bool
 	sshAgentForwarding  bool
+	sshTCPForwarding    bool
 	seccomp             bool
 	tmpSizeMiB          uint32
 	disableSSH          bool
@@ -123,6 +124,14 @@ func WithSSHHostKeyPath(path string) Option {
 // server creates a Unix socket and sets SSH_AUTH_SOCK for the session.
 func WithSSHAgentForwarding(enabled bool) Option {
 	return optionFunc(func(c *config) { c.sshAgentForwarding = enabled })
+}
+
+// WithSSHTCPForwarding controls whether the SSH server accepts
+// client-initiated "direct-tcpip" channels (ssh -L / -D). Required by
+// tools like VS Code Remote-SSH that reach their in-guest server over a
+// dynamic SOCKS forward. Disabled by default.
+func WithSSHTCPForwarding(enabled bool) Option {
+	return optionFunc(func(c *config) { c.sshTCPForwarding = enabled })
 }
 
 // WithTmpSize sets the size of the /tmp tmpfs in MiB. Defaults to 256 MiB when

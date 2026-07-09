@@ -11,6 +11,7 @@ import (
 	"crypto/rand"
 	"crypto/subtle"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"sync"
@@ -65,6 +66,14 @@ type Config struct {
 	// the server accepts auth-agent-req@openssh.com requests and creates
 	// per-session agent sockets.
 	AgentForwarding bool
+
+	// AllowTCPForwarding enables client-initiated "direct-tcpip" channels
+	// (ssh -L / -D). When true, the server dials the requested host:port
+	// from inside the guest and pipes the channel. Tools like VS Code
+	// Remote-SSH require this to reach their in-guest server over a
+	// dynamic SOCKS forward. Default false: non-session channels are
+	// rejected, preserving the shell/exec-only posture.
+	AllowTCPForwarding bool
 
 	// HostKey is an optional pre-generated host key signer. When non-nil,
 	// the server uses this key instead of generating an ephemeral one.
@@ -242,9 +251,24 @@ func (s *Server) handleConnection(netConn net.Conn) {
 
 	channelCount := 0
 	for newCh := range chans {
-		if newCh.ChannelType() != "session" {
+		chanType := newCh.ChannelType()
+		if chanType == "direct-tcpip" && s.cfg.AllowTCPForwarding {
+			channelCount++
+			if channelCount > maxChannelsPerConn {
+				s.logger.Warn("too many channels, rejecting", "count", channelCount)
+				_ = newCh.Reject(ssh.ResourceShortage, "too many channels")
+				continue
+			}
+			s.wg.Add(1)
+			go func() {
+				defer s.wg.Done()
+				s.handleDirectTCPIP(newCh)
+			}()
+			continue
+		}
+		if chanType != "session" {
 			s.logger.Warn("rejecting non-session channel",
-				"type", newCh.ChannelType(),
+				"type", chanType,
 			)
 			_ = newCh.Reject(ssh.UnknownChannelType, "only session channels are supported")
 			continue
@@ -271,6 +295,54 @@ func (s *Server) handleConnection(netConn net.Conn) {
 			s.handleSession(ch, requests, srvConn)
 		}()
 	}
+}
+
+// directTCPIPExtra is the RFC 4254 §7.2 "direct-tcpip" channel-open payload.
+type directTCPIPExtra struct {
+	DestAddr   string
+	DestPort   uint32
+	OriginAddr string
+	OriginPort uint32
+}
+
+// handleDirectTCPIP services a client-initiated "direct-tcpip" channel by
+// dialing the requested destination from inside the guest and piping bytes
+// bidirectionally. Only reachable when AllowTCPForwarding is set. The dial
+// target is whatever the guest itself can reach (loopback services plus any
+// gateway-proxied egress); this grants the SSH client no route the guest
+// shell does not already have.
+func (s *Server) handleDirectTCPIP(newCh ssh.NewChannel) {
+	var req directTCPIPExtra
+	if err := ssh.Unmarshal(newCh.ExtraData(), &req); err != nil {
+		s.logger.Warn("bad direct-tcpip payload", "error", err)
+		_ = newCh.Reject(ssh.ConnectionFailed, "invalid direct-tcpip request")
+		return
+	}
+	dest := net.JoinHostPort(req.DestAddr, fmt.Sprintf("%d", req.DestPort))
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.Dial("tcp", dest)
+	if err != nil {
+		s.logger.Warn("direct-tcpip dial failed", "dest", dest, "error", err)
+		_ = newCh.Reject(ssh.ConnectionFailed, fmt.Sprintf("dial %s: %v", dest, err))
+		return
+	}
+	defer func() { _ = conn.Close() }()
+
+	ch, reqs, err := newCh.Accept()
+	if err != nil {
+		s.logger.Error("accept direct-tcpip channel", "error", err)
+		return
+	}
+	defer func() { _ = ch.Close() }()
+	go ssh.DiscardRequests(reqs)
+
+	s.logger.Debug("direct-tcpip forwarding", "dest", dest)
+	done := make(chan struct{}, 2)
+	go func() { _, _ = io.Copy(ch, conn); done <- struct{}{} }()
+	go func() { _, _ = io.Copy(conn, ch); done <- struct{}{} }()
+	<-done
+	// Unblock the peer copy: closing both ends (deferred) makes the second
+	// io.Copy return so its goroutine exits and the WaitGroup can drain.
 }
 
 // handleGlobalRequests processes connection-level SSH requests.
