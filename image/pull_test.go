@@ -515,8 +515,32 @@ func TestPullWithFetcher_CacheMiss(t *testing.T) {
 	assert.DirExists(t, rootfs.Path)
 	assert.NotNil(t, rootfs.Config)
 
-	// Fresh extractions are the only reference — safe to modify in place.
-	assert.False(t, rootfs.FromCache, "cache miss should set FromCache=false")
+	// The fresh extraction was moved INTO the cache and the canonical cache
+	// path returned — the next Pull of this digest serves the same directory.
+	// Callers must COW-clone before modifying, so this is cache-owned.
+	assert.True(t, rootfs.FromCache, "cache-owned path must set FromCache=true even on a miss")
+}
+
+// A fresh extraction with a cache and a subsequent cache hit alias the SAME
+// directory: a caller that mutates the first result (e.g. a VM booting on it)
+// corrupts every later boot of that image. Both results must therefore be
+// flagged cache-owned.
+func TestPullWithFetcher_FreshExtractionIsCacheOwned(t *testing.T) {
+	t.Parallel()
+
+	fakeImg, err := random.Image(256, 1)
+	require.NoError(t, err)
+
+	cache := NewCache(t.TempDir())
+
+	first, err := PullWithFetcher(context.Background(), "example.com/test:latest", cache, &mockFetcher{img: fakeImg})
+	require.NoError(t, err)
+	second, err := PullWithFetcher(context.Background(), "example.com/test:latest", cache, &mockFetcher{img: fakeImg})
+	require.NoError(t, err)
+
+	require.Equal(t, first.Path, second.Path, "miss-then-hit must serve the same cache directory")
+	assert.True(t, first.FromCache, "first (fresh) result aliases the cache and must be flagged cache-owned")
+	assert.True(t, second.FromCache)
 }
 
 func TestPullWithFetcher_NilCache(t *testing.T) {

@@ -107,6 +107,7 @@ type config struct {
 	dataDir               string
 	egressPolicy          *EgressPolicy
 	virtioFS              []VirtioFSMount
+	dataDisks             []string
 	imageCache            *image.Cache
 	externalCache         bool               // true when WithImageCache was called explicitly
 	imageFetcher          image.ImageFetcher // nil = default local-then-remote fallback
@@ -316,6 +317,12 @@ func WithEgressPolicy(p EgressPolicy) Option {
 // WithVirtioFS adds virtio-fs mounts that expose host directories to the guest.
 func WithVirtioFS(mounts ...VirtioFSMount) Option {
 	return optionFunc(func(c *config) { c.virtioFS = append(c.virtioFS, mounts...) })
+}
+
+// WithDataDisk attaches a host raw-image file as a guest virtio-blk device
+// (e.g. docker's /var/lib/docker). It appears after the rootfs as /dev/vd*.
+func WithDataDisk(paths ...string) Option {
+	return optionFunc(func(c *config) { c.dataDisks = append(c.dataDisks, paths...) })
 }
 
 // WithImageCache sets a custom image cache. When set, [WithDataDir] will not

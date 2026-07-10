@@ -33,7 +33,7 @@ type KrunConfig struct {
 type RootFS struct {
 	Path      string     // Filesystem path to the extracted rootfs directory
 	Config    *OCIConfig // Parsed OCI image configuration
-	FromCache bool       // True when the rootfs was served from cache (not freshly extracted)
+	FromCache bool       // True when Path is cache-owned (shared) — clone before modifying; false only for cache-less private extractions
 }
 
 // krunConfigFile is the filename written inside the rootfs.

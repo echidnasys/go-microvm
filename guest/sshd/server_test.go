@@ -9,6 +9,7 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"fmt"
 	"log/slog"
 	"net"
 	"os"
@@ -200,6 +201,65 @@ func TestExecCommandEnv(t *testing.T) {
 	assert.Equal(t, "xterm-256color\n", string(output))
 }
 
+// A server configured without PATH (the production case: the boot env file
+// carries only injected variables) must still give sessions a usable PATH.
+// Without it, the wrapper shell survives on its unset-PATH builtin lookup,
+// but every child process inherits NO PATH and subprocess spawning breaks
+// (observed: an agent's shell tool with PATH empty, exit 127 on `ls`).
+func TestExecCommandDefaultPATHWhenUnconfigured(t *testing.T) {
+	t.Parallel()
+
+	signer, pubKey := generateTestKeyPair(t)
+	_, addr := startTestServerWithConfig(t, Config{
+		Port:           0,
+		AuthorizedKeys: []ssh.PublicKey{pubKey},
+		Env:            []string{"INJECTED=x"}, // no PATH — mirrors boot.go's env-file load
+		DefaultUID:     uint32(os.Getuid()),
+		DefaultGID:     uint32(os.Getgid()),
+		DefaultUser:    "testuser",
+		DefaultHome:    os.TempDir(),
+		DefaultShell:   "/bin/sh",
+		Logger:         slog.Default(),
+	})
+
+	client := dialSSH(t, addr, signer)
+	session, err := client.NewSession()
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+
+	// Inspect the CHILD process environment, not shell expansion: a shell
+	// with unset PATH invents an internal default for its own lookups but
+	// does not export it, so `echo $PATH` looks fine while every child
+	// process still inherits no PATH at all.
+	output, err := session.CombinedOutput(`/usr/bin/env`)
+	require.NoError(t, err)
+	var pathLine string
+	for _, l := range strings.Split(string(output), "\n") {
+		if strings.HasPrefix(l, "PATH=") {
+			pathLine = l
+		}
+	}
+	require.NotEmpty(t, pathLine, "child processes must inherit a PATH; got env:\n%s", output)
+	assert.Contains(t, pathLine, "/usr/bin", "default PATH must include the standard binary dirs")
+}
+
+// An explicitly configured PATH must win over the default.
+func TestExecCommandConfiguredPATHWins(t *testing.T) {
+	t.Parallel()
+
+	signer, pubKey := generateTestKeyPair(t)
+	_, addr := startTestServer(t, pubKey) // configures PATH=/usr/bin:/bin
+
+	client := dialSSH(t, addr, signer)
+	session, err := client.NewSession()
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+
+	output, err := session.CombinedOutput(`echo "[$PATH]"`)
+	require.NoError(t, err)
+	assert.Equal(t, "[/usr/bin:/bin]", strings.TrimSpace(string(output)))
+}
+
 func TestExitCode(t *testing.T) {
 	t.Parallel()
 
@@ -227,13 +287,98 @@ func TestNonSessionChannelRejected(t *testing.T) {
 
 	client := dialSSH(t, addr, signer)
 
-	// Attempt to open a non-session channel type.
+	// Attempt to open a non-session channel type. With AllowTCPForwarding
+	// unset (the default startTestServer config), it must be rejected.
 	_, _, err := client.OpenChannel("direct-tcpip", nil)
 	require.Error(t, err)
 
 	openChErr, ok := err.(*ssh.OpenChannelError)
 	require.True(t, ok, "expected *ssh.OpenChannelError, got %T", err)
 	assert.Equal(t, ssh.UnknownChannelType, openChErr.Reason)
+}
+
+// With AllowTCPForwarding enabled, a direct-tcpip channel must be accepted
+// and forwarded to the requested destination inside the guest. VS Code
+// Remote-SSH depends on exactly this to reach its in-guest server.
+func TestDirectTCPIPForwardsWhenEnabled(t *testing.T) {
+	t.Parallel()
+
+	// Backend the forward should reach: an echo-with-prefix TCP listener.
+	backend, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = backend.Close() })
+	go func() {
+		for {
+			c, err := backend.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer func() { _ = c.Close() }()
+				buf := make([]byte, 64)
+				n, _ := c.Read(buf)
+				_, _ = c.Write(append([]byte("echo:"), buf[:n]...))
+			}()
+		}
+	}()
+	_, backendPortStr, err := net.SplitHostPort(backend.Addr().String())
+	require.NoError(t, err)
+	var backendPort int
+	_, err = fmt.Sscanf(backendPortStr, "%d", &backendPort)
+	require.NoError(t, err)
+
+	signer, pubKey := generateTestKeyPair(t)
+	_, addr := startTestServerWithConfig(t, Config{
+		Port:               0,
+		AuthorizedKeys:     []ssh.PublicKey{pubKey},
+		Env:                []string{"PATH=/usr/bin:/bin"},
+		DefaultUID:         uint32(os.Getuid()),
+		DefaultGID:         uint32(os.Getgid()),
+		DefaultUser:        "testuser",
+		DefaultHome:        os.TempDir(),
+		DefaultShell:       "/bin/sh",
+		AllowTCPForwarding: true,
+		Logger:             slog.Default(),
+	})
+
+	client := dialSSH(t, addr, signer)
+
+	// DialTCP over SSH opens a direct-tcpip channel to the backend.
+	fwd, err := client.Dial("tcp", backend.Addr().String())
+	require.NoError(t, err)
+	defer func() { _ = fwd.Close() }()
+
+	_, err = fwd.Write([]byte("hello"))
+	require.NoError(t, err)
+	buf := make([]byte, 64)
+	n, err := fwd.Read(buf)
+	require.NoError(t, err)
+	assert.Equal(t, "echo:hello", string(buf[:n]))
+}
+
+// A direct-tcpip request to an unreachable destination must be rejected
+// with ConnectionFailed, not hang or panic.
+func TestDirectTCPIPRejectsUnreachable(t *testing.T) {
+	t.Parallel()
+
+	signer, pubKey := generateTestKeyPair(t)
+	_, addr := startTestServerWithConfig(t, Config{
+		Port:               0,
+		AuthorizedKeys:     []ssh.PublicKey{pubKey},
+		Env:                []string{"PATH=/usr/bin:/bin"},
+		DefaultUID:         uint32(os.Getuid()),
+		DefaultGID:         uint32(os.Getgid()),
+		DefaultUser:        "testuser",
+		DefaultHome:        os.TempDir(),
+		DefaultShell:       "/bin/sh",
+		AllowTCPForwarding: true,
+		Logger:             slog.Default(),
+	})
+
+	client := dialSSH(t, addr, signer)
+	// Port 1 on loopback: nothing listens there.
+	_, err := client.Dial("tcp", "127.0.0.1:1")
+	require.Error(t, err)
 }
 
 func TestDefaultWorkDir(t *testing.T) {

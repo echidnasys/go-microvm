@@ -272,6 +272,7 @@ func Run(ctx context.Context, imageRef string, opts ...Option) (*VM, error) {
 		RAMMiB:           cfg.memory,
 		PortForwards:     toHypervisorPorts(cfg.ports),
 		FilesystemMounts: toHypervisorMounts(cfg.virtioFS),
+		DataDisks:        cfg.dataDisks,
 		VsockPorts:       toHypervisorVsockPorts(cfg.vsockPorts),
 		InitConfig:       initCfg,
 		DataDir:          cfg.dataDir,

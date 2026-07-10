@@ -67,6 +67,8 @@ type Config struct {
 	PortForwards []PortForward `json:"port_forwards,omitempty"`
 	// VirtioFSMounts contains virtio-fs mounts as tag:path entries.
 	VirtioFSMounts []VirtioFSMount `json:"virtiofs_mounts,omitempty"`
+	// DataDisks are host raw-image paths attached as guest virtio-blk devices.
+	DataDisks []string `json:"data_disks,omitempty"`
 	// VsockPorts wires guest vsock ports to host Unix domain socket paths
 	// via krun_add_vsock_port. Used by bbox-k8s for ttrpc-over-vsock.
 	VsockPorts []VsockPort `json:"vsock_ports,omitempty"`
@@ -222,6 +224,14 @@ func runVM(config *Config) error {
 		if err := ctx.AddVirtioFS(mount.Tag, mount.Path); err != nil {
 			_ = ctx.Free()
 			return fmt.Errorf("add virtiofs mount %s: %w", mount.Tag, err)
+		}
+	}
+
+	// Configure data disks (raw virtio-blk devices, e.g. docker /var/lib/docker).
+	for i, disk := range config.DataDisks {
+		if err := ctx.AddDisk(fmt.Sprintf("data%d", i), disk, false); err != nil {
+			_ = ctx.Free()
+			return fmt.Errorf("add data disk %s: %w", disk, err)
 		}
 	}
 
