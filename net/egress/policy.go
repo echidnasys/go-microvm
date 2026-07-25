@@ -41,10 +41,17 @@ func NewPolicy(hosts []HostSpec) *Policy {
 			ports:    h.Ports,
 			protocol: h.Protocol,
 		}
-		if strings.HasPrefix(name, "*.") {
+		switch {
+		case strings.HasPrefix(name, "**."):
+			// Explicit multi-label form. Suffix matching below already
+			// covers any depth, so it behaves like "*." here — accepted so
+			// profiles shared with single-label-strict proxies parse cleanly.
+			e.wildcard = true
+			e.suffix = name[2:] // ".amazonaws.com"
+		case strings.HasPrefix(name, "*."):
 			e.wildcard = true
 			e.suffix = name[1:] // ".docker.io"
-		} else {
+		default:
 			e.exact = name
 		}
 		entries[i] = e
