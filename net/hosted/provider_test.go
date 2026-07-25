@@ -190,6 +190,35 @@ func TestPortForwardMap(t *testing.T) {
 	_ = conn.Close()
 }
 
+func TestStopReleasesForwardedPorts(t *testing.T) {
+	t.Parallel()
+
+	dir := testutil.ShortTempDir(t)
+	p := NewProvider()
+	hostPort := freePort(t)
+
+	err := p.Start(context.Background(), propnet.Config{
+		LogDir: dir,
+		Forwards: []propnet.PortForward{
+			{Host: hostPort, Guest: 22},
+		},
+	})
+	require.NoError(t, err)
+
+	p.Stop()
+
+	// Both listeners (IPv4 and IPv6) must be released so a subsequent
+	// provider in the same process can bind the same host port.
+	for _, addr := range []string{
+		fmt.Sprintf("127.0.0.1:%d", hostPort),
+		fmt.Sprintf("[::1]:%d", hostPort),
+	} {
+		l, err := net.Listen("tcp", addr)
+		require.NoError(t, err, "host port %s should be free after Stop", addr)
+		_ = l.Close()
+	}
+}
+
 func TestProvider_StartWithEgressPolicy(t *testing.T) {
 	t.Parallel()
 

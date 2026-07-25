@@ -4,10 +4,13 @@
 package hosted
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -37,6 +40,7 @@ type Provider struct {
 	wg              sync.WaitGroup
 	pendingServices []Service
 	runningServices []runningService
+	forwardLocals   []string
 }
 
 // NewProvider creates a new hosted network provider.
@@ -67,6 +71,14 @@ func (p *Provider) Start(ctx context.Context, cfg propnet.Config) error {
 		guestAddr := fmt.Sprintf("%s:%d", topology.GuestIP, pf.Guest)
 		forwards[fmt.Sprintf("127.0.0.1:%d", pf.Host)] = guestAddr
 		forwards[fmt.Sprintf("[::1]:%d", pf.Host)] = guestAddr
+	}
+	// Remember the host-side addresses so Stop can unexpose them: the
+	// listeners virtualnetwork.New binds from Forwards otherwise live for
+	// the whole process, and a later provider in this process would fail
+	// to bind the same ports.
+	p.forwardLocals = make([]string, 0, len(forwards))
+	for local := range forwards {
+		p.forwardLocals = append(p.forwardLocals, local)
 	}
 
 	// Create the virtual network stack.
@@ -135,7 +147,12 @@ func (p *Provider) Stop() {
 	cancel := p.cancel
 	listener := p.listener
 	sockPath := p.sockPath
+	vn := p.vn
+	forwardLocals := p.forwardLocals
+	p.forwardLocals = nil
 	p.mu.Unlock()
+
+	unexposeForwards(vn, forwardLocals)
 
 	// Shut down HTTP services outside the lock so Shutdown's blocking
 	// does not prevent other callers from acquiring the mutex.
@@ -155,6 +172,50 @@ func (p *Provider) Stop() {
 	// Clean up the socket file.
 	if sockPath != "" {
 		_ = os.Remove(sockPath)
+	}
+}
+
+// unexposeForwards closes the host-side port-forward listeners that
+// virtualnetwork.New bound from the Forwards map. gvisor-tap-vsock has no
+// VirtualNetwork teardown API, so this drives the forwarder's unexpose
+// endpoint through the in-process services mux — the same handler external
+// clients use — which closes each underlying host listener.
+func unexposeForwards(vn *virtualnetwork.VirtualNetwork, locals []string) {
+	if vn == nil || len(locals) == 0 {
+		return
+	}
+	mux := vn.ServicesMux()
+	for _, local := range locals {
+		body, err := json.Marshal(types.UnexposeRequest{Protocol: types.TCP, Local: local})
+		if err != nil {
+			continue
+		}
+		req, err := http.NewRequest(http.MethodPost, "/services/forwarder/unexpose", bytes.NewReader(body))
+		if err != nil {
+			continue
+		}
+		rec := &statusRecorder{}
+		mux.ServeHTTP(rec, req)
+		if rec.status != http.StatusOK {
+			slog.Warn("unexpose port forward failed", "local", local, "status", rec.status)
+		}
+	}
+}
+
+// statusRecorder is the minimal http.ResponseWriter needed to drive the
+// services mux in-process; only the response status is of interest.
+type statusRecorder struct{ status int }
+
+func (r *statusRecorder) Header() http.Header { return http.Header{} }
+func (r *statusRecorder) Write(b []byte) (int, error) {
+	if r.status == 0 {
+		r.status = http.StatusOK
+	}
+	return len(b), nil
+}
+func (r *statusRecorder) WriteHeader(code int) {
+	if r.status == 0 {
+		r.status = code
 	}
 }
 
