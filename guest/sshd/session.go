@@ -389,12 +389,17 @@ func sendExitStatus(ch ssh.Channel, code int) {
 }
 
 // exitCode extracts the numeric exit code from the error returned by
-// exec.Cmd.Wait().
+// exec.Cmd.Wait(). Signal deaths map to the shell convention 128+signum
+// (SIGKILL → 137): ExitCode() reports them as -1, which the SSH exit-status
+// uint32 would show clients as a meaningless 4294967295.
 func exitCode(err error) int {
 	if err == nil {
 		return 0
 	}
 	if exitErr, ok := err.(*exec.ExitError); ok {
+		if ws, ok := exitErr.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
+			return 128 + int(ws.Signal())
+		}
 		return exitErr.ExitCode()
 	}
 	return 1
