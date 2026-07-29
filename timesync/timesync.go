@@ -22,12 +22,18 @@ const (
 	// Guest time is read at whole-second granularity, so anything below
 	// 2s is indistinguishable from measurement noise.
 	DefaultThreshold = 2 * time.Second
+
+	// SetTimeCommand is the reserved exec command the guest sshd handles
+	// in-process (as root) instead of spawning a shell: "go-microvm-settime
+	// <epoch-seconds>" steps the guest clock via clock_settime. Session
+	// shells run privilege-dropped and images ship no doas/sudo, so this is
+	// the only root-capable path from host to guest clock.
+	SetTimeCommand = "go-microvm-settime"
 )
 
 // GuestRunner executes commands in the guest. *ssh.Client satisfies it.
 type GuestRunner interface {
 	Run(ctx context.Context, cmd string) (string, error)
-	RunSudo(ctx context.Context, cmd string) (string, error)
 }
 
 // Result reports the outcome of a single sync check.
@@ -40,10 +46,11 @@ type Result struct {
 }
 
 // Syncer periodically measures guest wall-clock skew against the host and
-// steps the guest clock when it drifts beyond a threshold. Stepping uses
-// date(1), which busybox implements via clock_settime — the one time-setting
-// syscall the guest seccomp policy permits (settimeofday and clock_adjtime
-// are blocked, so slewing daemons like chrony cannot run in the guest).
+// steps the guest clock when it drifts beyond a threshold. Stepping sends
+// SetTimeCommand, which the guest sshd executes in-process via clock_settime —
+// the one time-setting syscall the guest seccomp policy permits (settimeofday
+// and clock_adjtime are blocked, so slewing daemons like chrony cannot run in
+// the guest).
 type Syncer struct {
 	runner    GuestRunner
 	interval  time.Duration
@@ -97,7 +104,7 @@ func (s *Syncer) SyncOnce(ctx context.Context) (Result, error) {
 		return res, nil
 	}
 
-	if _, err := s.runner.RunSudo(ctx, fmt.Sprintf("date -u -s @%d", s.now().Unix())); err != nil {
+	if _, err := s.runner.Run(ctx, fmt.Sprintf("%s %d", SetTimeCommand, s.now().Unix())); err != nil {
 		return res, fmt.Errorf("step guest clock: %w", err)
 	}
 	res.Stepped = true

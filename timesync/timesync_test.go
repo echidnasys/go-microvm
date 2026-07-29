@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,27 +18,39 @@ import (
 // The SSH client is the intended production GuestRunner.
 var _ GuestRunner = (*ssh.Client)(nil)
 
-// fakeRunner scripts the guest side: Run returns the configured date output,
-// RunSudo records the step commands it receives.
+// fakeRunner scripts the guest side: clock reads return dateOutput, settime
+// commands are recorded and return stepErr.
 type fakeRunner struct {
 	dateOutput string
-	runErr     error
-	sudoErr    error
+	readErr    error
+	stepErr    error
 
-	runCalls  atomic.Int64
-	sudoCmds  []string
-	sudoCalls atomic.Int64
+	mu       sync.Mutex
+	readCmds []string
+	stepCmds []string
 }
 
-func (f *fakeRunner) Run(_ context.Context, _ string) (string, error) {
-	f.runCalls.Add(1)
-	return f.dateOutput, f.runErr
+func (f *fakeRunner) Run(_ context.Context, cmd string) (string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if strings.HasPrefix(cmd, SetTimeCommand) {
+		f.stepCmds = append(f.stepCmds, cmd)
+		return "", f.stepErr
+	}
+	f.readCmds = append(f.readCmds, cmd)
+	return f.dateOutput, f.readErr
 }
 
-func (f *fakeRunner) RunSudo(_ context.Context, cmd string) (string, error) {
-	f.sudoCalls.Add(1)
-	f.sudoCmds = append(f.sudoCmds, cmd)
-	return "", f.sudoErr
+func (f *fakeRunner) reads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return len(f.readCmds)
+}
+
+func (f *fakeRunner) steps() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]string(nil), f.stepCmds...)
 }
 
 func TestSyncOnce(t *testing.T) {
@@ -93,29 +105,30 @@ func TestSyncOnce(t *testing.T) {
 			if res.Skew != tt.wantSkew {
 				t.Errorf("Skew = %v, want %v", res.Skew, tt.wantSkew)
 			}
+			steps := runner.steps()
 			if tt.wantStepped {
-				if len(runner.sudoCmds) != 1 {
-					t.Fatalf("sudo commands = %v, want exactly one", runner.sudoCmds)
+				if len(steps) != 1 {
+					t.Fatalf("step commands = %v, want exactly one", steps)
 				}
-				want := fmt.Sprintf("date -u -s @%d", hostNow.Unix())
-				if runner.sudoCmds[0] != want {
-					t.Errorf("step command = %q, want %q", runner.sudoCmds[0], want)
+				want := fmt.Sprintf("%s %d", SetTimeCommand, hostNow.Unix())
+				if steps[0] != want {
+					t.Errorf("step command = %q, want %q", steps[0], want)
 				}
-			} else if runner.sudoCalls.Load() != 0 {
-				t.Errorf("unexpected step commands: %v", runner.sudoCmds)
+			} else if len(steps) != 0 {
+				t.Errorf("unexpected step commands: %v", steps)
 			}
 		})
 	}
 }
 
 func TestSyncOnceReadError(t *testing.T) {
-	runner := &fakeRunner{runErr: errors.New("ssh: connection refused")}
+	runner := &fakeRunner{readErr: errors.New("ssh: connection refused")}
 	s := New(runner)
 	_, err := s.SyncOnce(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "connection refused") {
 		t.Fatalf("err = %v", err)
 	}
-	if runner.sudoCalls.Load() != 0 {
+	if len(runner.steps()) != 0 {
 		t.Error("stepped despite read error")
 	}
 }
@@ -130,7 +143,7 @@ func TestSyncOnceBadGuestOutput(t *testing.T) {
 }
 
 func TestSyncOnceStepError(t *testing.T) {
-	runner := &fakeRunner{dateOutput: "100\n", sudoErr: errors.New("doas: not permitted")}
+	runner := &fakeRunner{dateOutput: "100\n", stepErr: errors.New("settime: not permitted")}
 	s := New(runner)
 	_, err := s.SyncOnce(context.Background())
 	if err == nil || !strings.Contains(err.Error(), "not permitted") {
@@ -165,13 +178,13 @@ func TestRunSyncsImmediatelyThenPeriodically(t *testing.T) {
 		t.Fatalf("err = %v, want deadline exceeded", err)
 	}
 	// One immediate sync plus at least one ticker firing.
-	if n := runner.runCalls.Load(); n < 2 {
+	if n := runner.reads(); n < 2 {
 		t.Errorf("guest clock reads = %d, want >= 2", n)
 	}
 }
 
 func TestRunKeepsGoingAfterSyncError(t *testing.T) {
-	runner := &fakeRunner{dateOutput: "100\n", runErr: errors.New("ssh flake")}
+	runner := &fakeRunner{dateOutput: "100\n", readErr: errors.New("ssh flake")}
 	s := New(runner, WithInterval(10*time.Millisecond))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Millisecond)
@@ -180,7 +193,7 @@ func TestRunKeepsGoingAfterSyncError(t *testing.T) {
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("err = %v, want deadline exceeded (loop must survive sync errors)", err)
 	}
-	if n := runner.runCalls.Load(); n < 2 {
+	if n := runner.reads(); n < 2 {
 		t.Errorf("guest clock reads = %d, want >= 2 despite errors", n)
 	}
 }

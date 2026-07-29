@@ -94,6 +94,13 @@ type Server struct {
 	logger     *slog.Logger
 	agentFwdMu sync.Mutex
 	agentFwd   map[*ssh.ServerConn]bool
+
+	// settime steps the system wall clock to the given epoch seconds. It
+	// backs the reserved timesync.SetTimeCommand exec command, which is
+	// handled in-process: the server runs as root while session shells drop
+	// to the default UID and cannot set the clock. Defaults to
+	// setSystemClock; injected for testability.
+	settime func(epochSeconds int64) error
 }
 
 // New creates a new Server with an ephemeral ECDSA P-256 host key. It
@@ -150,6 +157,7 @@ func New(cfg Config) (*Server, error) {
 		quit:     make(chan struct{}),
 		logger:   logger,
 		agentFwd: make(map[*ssh.ServerConn]bool),
+		settime:  setSystemClock,
 	}, nil
 }
 
