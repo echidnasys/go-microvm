@@ -144,6 +144,9 @@ func (s *Server) handleSession(ch ssh.Channel, requests <-chan *ssh.Request, con
 				continue
 			}
 			replyRequest(req, true)
+			if s.handleSettime(ch, payload.Command) {
+				return
+			}
 			s.executeCommand(ch, requests, state, payload.Command, conn)
 			return
 
