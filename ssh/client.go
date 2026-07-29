@@ -12,6 +12,7 @@ import (
 	"net"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"go.opentelemetry.io/otel"
@@ -116,6 +117,26 @@ func NewClient(host string, port uint16, user, keyPath string, opts ...ClientOpt
 	return c
 }
 
+// lockedBuffer is a bytes.Buffer safe for the concurrent stdout/stderr copy
+// goroutines the SSH transport spawns. Sharing a bare buffer between both
+// streams races and silently drops output.
+type lockedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
 // Run executes a command on the remote host and returns its combined
 // stdout and stderr output.
 func (c *Client) Run(ctx context.Context, cmd string) (string, error) {
@@ -126,7 +147,7 @@ func (c *Client) Run(ctx context.Context, cmd string) (string, error) {
 	defer cleanup()
 	defer func() { _ = session.Close() }()
 
-	var output bytes.Buffer
+	var output lockedBuffer
 	session.SetStdout(&output)
 	session.SetStderr(&output)
 
@@ -186,7 +207,7 @@ func (c *Client) CopyTo(ctx context.Context, localPath, remotePath string, mode 
 
 	session.SetStdin(bytes.NewReader(data))
 
-	var output bytes.Buffer
+	var output lockedBuffer
 	session.SetStdout(&output)
 	session.SetStderr(&output)
 

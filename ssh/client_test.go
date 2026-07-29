@@ -10,6 +10,7 @@ import (
 	"io"
 	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -596,4 +597,37 @@ func TestSSHConfig_WithoutHostKey_AcceptsAnyKey(t *testing.T) {
 
 	err = config.HostKeyCallback("testhost:2222", nil, anyPubKey)
 	assert.NoError(t, err, "insecure callback should accept any key")
+}
+
+// TestRun_ConcurrentStreamWrites emulates what x/crypto/ssh actually does:
+// stdout and stderr are copied by separate goroutines. Run must hand both
+// streams a writer that tolerates that, or output is lost/corrupted (the
+// symptom: intermittent empty output from Run against the guest sshd).
+func TestRun_ConcurrentStreamWrites(t *testing.T) {
+	t.Parallel()
+
+	session := &mockSession{}
+	session.runFn = func(string) error {
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 1000; i++ {
+				_, _ = session.stdout.Write([]byte("o"))
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 1000; i++ {
+				_, _ = session.stderr.Write([]byte("e"))
+			}
+		}()
+		wg.Wait()
+		return nil
+	}
+
+	c := newTestClient(t, session)
+	out, err := c.Run(context.Background(), "noisy")
+	require.NoError(t, err)
+	assert.Len(t, out, 2000, "no bytes may be lost to the stdout/stderr race")
 }
