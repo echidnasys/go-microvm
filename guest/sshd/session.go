@@ -331,7 +331,18 @@ func (s *Server) runWithPTY(ch ssh.Channel, requests <-chan *ssh.Request, cmd *e
 // runWithoutPTY executes the command with direct stdin/stdout/stderr
 // piping, handling signal forwarding.
 func (s *Server) runWithoutPTY(ch ssh.Channel, requests <-chan *ssh.Request, cmd *exec.Cmd) int {
-	cmd.Stdin = ch
+	// Stdin must be wired through StdinPipe with a detached copy, NOT
+	// cmd.Stdin = ch: a non-*os.File Stdin makes os/exec spawn a copy
+	// goroutine that cmd.Wait() blocks on until the CLIENT closes stdin.
+	// A command that exits without draining stdin then never gets its
+	// exit-status sent, deadlocking clients (e.g. scp) that hold stdin
+	// open while waiting for the command's status. The detached copy
+	// unblocks when sendExitStatus closes the channel.
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		s.logger.Error("stdin pipe", "error", err)
+		return 1
+	}
 	cmd.Stdout = ch
 	cmd.Stderr = ch.Stderr()
 
@@ -339,6 +350,10 @@ func (s *Server) runWithoutPTY(ch ssh.Channel, requests <-chan *ssh.Request, cmd
 		s.logger.Error("start command", "error", err)
 		return 1
 	}
+	go func() {
+		_, _ = io.Copy(stdin, ch)
+		_ = stdin.Close()
+	}()
 
 	// Handle ongoing requests in the background.
 	go func() {
@@ -352,7 +367,7 @@ func (s *Server) runWithoutPTY(ch ssh.Channel, requests <-chan *ssh.Request, cmd
 		}
 	}()
 
-	err := cmd.Wait()
+	err = cmd.Wait()
 	return exitCode(err)
 }
 
