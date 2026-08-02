@@ -81,18 +81,45 @@ func (c *Cache) Put(digest string, rootfsPath string) error {
 
 	dst := c.pathFor(digest)
 
-	// If the destination already exists, another concurrent pull may have
-	// beaten us. Remove the duplicate we just extracted.
-	if _, err := os.Stat(dst); err == nil {
-		_ = os.RemoveAll(rootfsPath)
+	// Rename first — an atomic install. A stat-before-rename existence guard
+	// would open a check-then-act window against concurrent pulls of the
+	// same digest (observed in production as ENOTEMPTY here).
+	err := os.Rename(rootfsPath, dst)
+	if err == nil {
 		return nil
 	}
 
-	if err := os.Rename(rootfsPath, dst); err != nil {
-		return fmt.Errorf("move rootfs to cache: %w", err)
+	// dst already exists. Two cases:
+	//  - Empty directory: debris (e.g. an interrupted eviction), never a
+	//    valid entry — clear it and retry the install once. rename(2) does
+	//    not replace an existing directory on Darwin, even an empty one.
+	//  - Non-empty directory: a concurrent pull of the same digest won the
+	//    race. Entries are content-addressed, so the winner's copy is
+	//    equivalent — discard our duplicate and report success.
+	if removeIfEmptyDir(dst) {
+		if retryErr := os.Rename(rootfsPath, dst); retryErr == nil {
+			return nil
+		}
+		// The retry can only lose to another concurrent putter; fall
+		// through to the winner check.
 	}
+	if info, statErr := os.Stat(dst); statErr == nil && info.IsDir() {
+		_ = os.RemoveAll(rootfsPath)
+		return nil
+	}
+	return fmt.Errorf("move rootfs to cache: %w", err)
+}
 
-	return nil
+// removeIfEmptyDir removes path if it is an empty directory, returning true
+// on removal. Removal is race-safe: if another process populates path between
+// the read and the remove, rmdir fails on the non-empty directory and the
+// contents are untouched.
+func removeIfEmptyDir(path string) bool {
+	entries, err := os.ReadDir(path)
+	if err != nil || len(entries) != 0 {
+		return false
+	}
+	return os.Remove(path) == nil
 }
 
 // TempDir creates a temporary directory inside the cache's base directory.
