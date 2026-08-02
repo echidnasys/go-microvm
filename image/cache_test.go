@@ -6,8 +6,10 @@ package image
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -148,6 +150,81 @@ func TestCache_DoublePut_NoConcurrencyError(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(cachedPath, "first"))
 	require.NoError(t, err)
 	assert.Equal(t, "1", string(data))
+}
+
+// TestCache_Put_ConcurrentSameDigest reproduces the concurrent-pull race:
+// several goroutines finish extracting the same image at nearly the same
+// moment and all call Put for one digest. Every call must succeed — losing
+// the rename race means the winner's identical, content-addressed entry is
+// already in place, which is success, not an error.
+func TestCache_Put_ConcurrentSameDigest(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	c := NewCache(cacheDir)
+
+	const rounds = 200
+	const putters = 8
+
+	for round := 0; round < rounds; round++ {
+		digest := fmt.Sprintf("sha256:race%d", round)
+
+		rootfs := make([]string, putters)
+		for i := range rootfs {
+			dir, err := c.TempDir()
+			require.NoError(t, err)
+			require.NoError(t, os.WriteFile(filepath.Join(dir, "marker"), []byte("x"), 0o644))
+			rootfs[i] = dir
+		}
+
+		start := make(chan struct{})
+		errs := make([]error, putters)
+		var wg sync.WaitGroup
+		for i := 0; i < putters; i++ {
+			wg.Add(1)
+			go func(i int) {
+				defer wg.Done()
+				<-start
+				errs[i] = c.Put(digest, rootfs[i])
+			}(i)
+		}
+		close(start)
+		wg.Wait()
+
+		for i, err := range errs {
+			require.NoErrorf(t, err, "round %d putter %d", round, i)
+		}
+
+		cachedPath, ok := c.Get(digest)
+		require.True(t, ok)
+		_, err := os.Stat(filepath.Join(cachedPath, "marker"))
+		require.NoError(t, err, "round %d: cached entry must contain a rootfs", round)
+	}
+}
+
+// TestCache_Put_OverEmptyDst: an empty destination directory (e.g. left
+// behind by an interrupted earlier Put) is never a valid cache entry. Put
+// must install the freshly extracted rootfs over it rather than silently
+// discarding the rootfs and leaving the poisoned empty entry in place.
+func TestCache_Put_OverEmptyDst(t *testing.T) {
+	t.Parallel()
+
+	cacheDir := t.TempDir()
+	c := NewCache(cacheDir)
+
+	digest := "sha256:emptydst"
+	require.NoError(t, os.MkdirAll(c.pathFor(digest), 0o700))
+
+	rootfs := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(rootfs, "marker"), []byte("content"), 0o644))
+
+	require.NoError(t, c.Put(digest, rootfs))
+
+	cachedPath, ok := c.Get(digest)
+	require.True(t, ok)
+	data, err := os.ReadFile(filepath.Join(cachedPath, "marker"))
+	require.NoError(t, err, "cached entry must contain the rootfs, not an empty shell")
+	assert.Equal(t, "content", string(data))
 }
 
 func TestCache_Evict_RemovesOldEntries(t *testing.T) {
