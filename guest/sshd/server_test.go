@@ -588,3 +588,38 @@ func TestNoSocketWithoutForwardingRequest(t *testing.T) {
 	result := strings.TrimSpace(string(output))
 	assert.Equal(t, "unset", result, "SSH_AUTH_SOCK should not be set without forwarding request")
 }
+
+// TestExitStatusWithStdinHeldOpen: a session whose command exits while the
+// client still holds stdin open must receive the exit status promptly.
+// Regression: cmd.Stdin = ch let os/exec's stdin-copy goroutine (which only
+// returns once the client closes stdin) block cmd.Wait() — deadlocking
+// against clients like scp that wait for the command's status before closing
+// stdin (live finding: VS Code Remote-SSH's server install hung forever when
+// the guest lacked scp, instead of failing fast with exit 127).
+func TestExitStatusWithStdinHeldOpen(t *testing.T) {
+	t.Parallel()
+
+	signer, pubKey := generateTestKeyPair(t)
+	_, addr := startTestServer(t, pubKey)
+
+	client := dialSSH(t, addr, signer)
+	session, err := client.NewSession()
+	require.NoError(t, err)
+	defer func() { _ = session.Close() }()
+
+	stdin, err := session.StdinPipe()
+	require.NoError(t, err)
+	defer func() { _ = stdin.Close() }() // held open until the status arrives
+
+	done := make(chan error, 1)
+	go func() { done <- session.Run("exit 42") }()
+
+	select {
+	case err := <-done:
+		exitErr, ok := err.(*ssh.ExitError)
+		require.True(t, ok, "expected *ssh.ExitError, got %T (%v)", err, err)
+		assert.Equal(t, 42, exitErr.ExitStatus())
+	case <-time.After(5 * time.Second):
+		t.Fatal("exit status not delivered while client stdin is held open")
+	}
+}
