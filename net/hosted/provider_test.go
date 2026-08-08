@@ -273,3 +273,57 @@ func TestProvider_StartWithEgressPolicy_ImplicitRules(t *testing.T) {
 	require.NoError(t, err, "forwarded host port should be reachable with egress policy")
 	_ = conn.Close()
 }
+
+// A Start that fails partway through binding port forwards must release
+// every listener it already bound. Regression: Forwards were passed into
+// virtualnetwork.New, which on a partial bind failure (EADDRINUSE on one
+// port) returns only an error — the listeners it had already created were
+// unreachable, lived for the daemon's lifetime, and wedged every retry on
+// the leaked ports until a daemon restart (live finding: a workspace's
+// fixed port set 3001/8000/8001/... after one transient collision).
+func TestFailedStartReleasesPartiallyBoundForwards(t *testing.T) {
+	t.Parallel()
+
+	// Several free ports so that, whatever order the forward map iterates
+	// in, some of them are (in the buggy code) bound before the blocked
+	// port fails the Start.
+	free := make([]uint16, 6)
+	for i := range free {
+		free[i] = freePort(t)
+	}
+	blocked := freePort(t)
+	blocker, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", blocked))
+	require.NoError(t, err)
+	defer func() { _ = blocker.Close() }()
+
+	forwards := make([]propnet.PortForward, 0, len(free)+1)
+	for i, port := range free {
+		forwards = append(forwards, propnet.PortForward{Host: port, Guest: uint16(8000 + i)})
+	}
+	forwards = append(forwards, propnet.PortForward{Host: blocked, Guest: 9000})
+
+	p := NewProvider()
+	err = p.Start(context.Background(), propnet.Config{
+		LogDir:   testutil.ShortTempDir(t),
+		Forwards: forwards,
+	})
+	require.Error(t, err, "Start must fail while a forward port is taken")
+
+	// Every non-blocked port must be bindable again on both families.
+	for _, port := range free {
+		for _, addr := range []string{fmt.Sprintf("127.0.0.1:%d", port), fmt.Sprintf("[::1]:%d", port)} {
+			l, lerr := net.Listen("tcp", addr)
+			require.NoErrorf(t, lerr, "%s still bound after failed Start (leaked forward)", addr)
+			_ = l.Close()
+		}
+	}
+
+	// Once the collision clears, a fresh Start with the same set succeeds.
+	require.NoError(t, blocker.Close())
+	p2 := NewProvider()
+	require.NoError(t, p2.Start(context.Background(), propnet.Config{
+		LogDir:   testutil.ShortTempDir(t),
+		Forwards: forwards,
+	}), "retry after the collision cleared must succeed")
+	p2.Stop()
+}

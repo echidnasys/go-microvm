@@ -72,31 +72,51 @@ func (p *Provider) Start(ctx context.Context, cfg propnet.Config) error {
 		forwards[fmt.Sprintf("127.0.0.1:%d", pf.Host)] = guestAddr
 		forwards[fmt.Sprintf("[::1]:%d", pf.Host)] = guestAddr
 	}
-	// Remember the host-side addresses so Stop can unexpose them: the
-	// listeners virtualnetwork.New binds from Forwards otherwise live for
-	// the whole process, and a later provider in this process would fail
-	// to bind the same ports.
-	p.forwardLocals = make([]string, 0, len(forwards))
-	for local := range forwards {
-		p.forwardLocals = append(p.forwardLocals, local)
-	}
-
-	// Create the virtual network stack.
+	// Create the virtual network stack WITHOUT forwards. Passing Forwards
+	// into virtualnetwork.New is a trap: on a partial bind failure (one
+	// host port taken) it returns only an error, and the listeners it had
+	// already bound are unreachable — they live for the daemon's lifetime,
+	// so every retry of the same session fails on the leaked ports until a
+	// daemon restart. Exposing each forward ourselves after New makes a
+	// failure unwindable.
 	vn, err := virtualnetwork.New(&types.Configuration{
 		Subnet:            topology.Subnet,
 		GatewayIP:         topology.GatewayIP,
 		GatewayMacAddress: topology.GatewayMAC,
 		MTU:               topology.MTU,
-		Forwards:          forwards,
 	})
 	if err != nil {
 		return fmt.Errorf("create virtual network: %w", err)
 	}
+
+	// Bind the host-side forwards one at a time; on any failure release
+	// what was already bound and fail Start cleanly, so the caller can
+	// retry once the colliding port frees up. The bound list also serves
+	// Stop, which unexposes the forwards of a successful Start.
+	bound := make([]string, 0, len(forwards))
+	// fail releases everything Start has acquired so far. Every error
+	// return below MUST go through it: a half-started provider that keeps
+	// listeners (or the services it started) alive wedges all later
+	// sessions that reuse the same ports.
+	fail := func(err error) error {
+		unexposeForwards(vn, bound)
+		p.forwardLocals = nil
+		p.vn = nil
+		return err
+	}
+	for local, guestAddr := range forwards {
+		if err := exposeForward(vn, local, guestAddr); err != nil {
+			return fail(fmt.Errorf("expose port forward %s: %w", local, err))
+		}
+		bound = append(bound, local)
+	}
+	p.forwardLocals = bound
 	p.vn = vn
 
 	// Start any registered services on the virtual network.
 	if err := p.startServices(); err != nil {
-		return fmt.Errorf("start services: %w", err)
+		p.shutdownServices(p.snapshotAndClearServices())
+		return fail(fmt.Errorf("start services: %w", err))
 	}
 
 	// Prepare the Unix socket path.
@@ -104,12 +124,14 @@ func (p *Provider) Start(ctx context.Context, cfg propnet.Config) error {
 
 	// Remove stale socket if present.
 	if err := os.Remove(p.sockPath); err != nil && !os.IsNotExist(err) {
-		return fmt.Errorf("remove stale socket: %w", err)
+		p.shutdownServices(p.snapshotAndClearServices())
+		return fail(fmt.Errorf("remove stale socket: %w", err))
 	}
 
 	listener, err := net.Listen("unix", p.sockPath)
 	if err != nil {
-		return fmt.Errorf("listen on unix socket: %w", err)
+		p.shutdownServices(p.snapshotAndClearServices())
+		return fail(fmt.Errorf("listen on unix socket: %w", err))
 	}
 	p.listener = listener
 
@@ -180,6 +202,26 @@ func (p *Provider) Stop() {
 // VirtualNetwork teardown API, so this drives the forwarder's unexpose
 // endpoint through the in-process services mux — the same handler external
 // clients use — which closes each underlying host listener.
+// exposeForward binds one host-side port forward through the virtual
+// network's services mux — the same endpoint unexposeForwards releases
+// through, so a forward bound here is always individually releasable.
+func exposeForward(vn *virtualnetwork.VirtualNetwork, local, remote string) error {
+	body, err := json.Marshal(types.ExposeRequest{Protocol: types.TCP, Local: local, Remote: remote})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequest(http.MethodPost, "/services/forwarder/expose", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	rec := &statusRecorder{}
+	vn.ServicesMux().ServeHTTP(rec, req)
+	if rec.status != http.StatusOK {
+		return fmt.Errorf("services mux returned status %d", rec.status)
+	}
+	return nil
+}
+
 func unexposeForwards(vn *virtualnetwork.VirtualNetwork, locals []string) {
 	if vn == nil || len(locals) == 0 {
 		return
